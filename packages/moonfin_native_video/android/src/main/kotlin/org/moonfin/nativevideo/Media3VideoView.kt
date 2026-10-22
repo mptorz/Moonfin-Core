@@ -2,12 +2,9 @@ package org.moonfin.nativevideo
 
 import android.app.ActivityManager
 import android.app.Activity
-import android.app.UiModeManager
 import android.content.Context
 import android.content.Intent
 import android.content.ContextWrapper
-import android.content.pm.PackageManager
-import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
@@ -845,23 +842,6 @@ class Media3VideoView(
     }
     private val isLowRamDevice = context.getSystemService<ActivityManager>()?.isLowRamDevice == true
     private val hasHardwareAv1Decoder by lazy { queryHardwareAv1DecoderAvailability() }
-    // Single-source collapse of app-module TvDevice.isTelevisionOrNull: leanback
-    // (incl. Fire TV) or the television ui mode. Both signals call into
-    // system_server and can throw, so a null/exception resolves to false. Here a
-    // misread only toggles the audio-offload optimization for one playback, so
-    // "treat-as-not-TV" is the safe default that keeps today's non-TV behavior.
-    private val isTvDevice: Boolean by lazy {
-        val hasLeanback = runCatching {
-            val pm = context.packageManager
-            pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
-                pm.hasSystemFeature("amazon.hardware.fire_tv")
-        }.getOrNull()
-        val isTelevisionUiMode = runCatching {
-            context.getSystemService<UiModeManager>()?.currentModeType ==
-                Configuration.UI_MODE_TYPE_TELEVISION
-        }.getOrNull()
-        hasLeanback == true || isTelevisionUiMode == true
-    }
     // Recreated alongside the player in createPlayer(). A TrackSelector must not
     // be shared across ExoPlayer instances: it binds to the playback thread of
     // the player it is built with, so reusing it after the player is released
@@ -1006,6 +986,11 @@ class Media3VideoView(
     private var resumeWedgeCheck: Runnable? = null
     private var pausedWhileReady = false
     private var skipSilenceEnabled = false
+    // Android-TV flag supplied by Dart (PlatformDetection.isTV via the setSource
+    // payload), which derives it from the single source of truth: the native
+    // isTvDevice method channel backed by TvDevice.isTelevisionOrNull. Defaults
+    // to false so a missing key keeps today's non-TV behavior.
+    private var isTvDevice = false
     // The delay the user set. Positive shows subtitles later.
     private var manualSubtitleDelayMs = 0L
     private var sidecarOffsetSources: List<TimeOffsetMediaSource> = emptyList()
@@ -2665,6 +2650,7 @@ class Media3VideoView(
         applyStereoDownmix(effectiveStereoDownmix())
         currentNormalizationGainDb = (args["normalizationGainDb"] as? Number)?.toFloat()
         skipSilenceEnabled = args["skipSilenceEnabled"] as? Boolean ?: false
+        isTvDevice = args["isTv"] as? Boolean ?: false
         manualSubtitleDelayMs = clampManualDelayMs((args["subtitleDelayMs"] as? Number)?.toLong() ?: 0L)
         sidecarOffsetSources = emptyList()
         embeddedOffsetSource = null
@@ -3127,7 +3113,11 @@ class Media3VideoView(
         tunnelingActive = shouldEnableTunneling
 
         // Offloaded audio bypasses the PCM processors, so skip silence would
-        // quietly do nothing there.
+        // quietly do nothing there. Audio offload also stalls audio-only
+        // playback on Android TV (e.g. audiobooks never start), so it is gated
+        // off there via isTvDevice, which the Dart layer supplies from
+        // PlatformDetection.isTV (see the setSource payload) rather than a
+        // duplicated native probe.
         val offloadMode = if (isAudioContent && !isTvDevice && !audioOffloadDisabled && !skipSilenceEnabled) {
             TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED
         } else {
